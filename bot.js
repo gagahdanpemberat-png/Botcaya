@@ -1,220 +1,16 @@
-import { kv } from '@vercel/kv';
-import { unzipSync } from 'fflate';
-
 const BOT = '9035443133:AAHMKTDBybElP12y1KVEqCT3EiO2wKKSgJc';
-const API = 'https://api.vercel.com';
 
-/* ============================================================
-   TELEGRAM
-   ============================================================ */
 async function tg(method, body) {
   const r = await fetch(`https://api.telegram.org/bot${BOT}/${method}`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
   });
   return r.json();
 }
-const reply = (chatId, text, opts = {}) =>
-  tg('sendMessage', { chat_id: chatId, text, parse_mode: 'HTML', disable_web_page_preview: true, ...opts });
-const editMsg = (chatId, msgId, text, opts = {}) =>
-  tg('editMessageText', { chat_id: chatId, message_id: msgId, text, parse_mode: 'HTML', disable_web_page_preview: true, ...opts });
-const answerCb = (id, text = '') => tg('answerCallbackQuery', { callback_query_id: id, text });
+const reply = (chatId, text) => tg('sendMessage', { chat_id: chatId, text, parse_mode: 'HTML' });
 
-/* ============================================================
-   VERCEL API
-   ============================================================ */
-async function vercelUser(token) {
-  const r = await fetch(API + '/v2/user', { headers: { Authorization: 'Bearer ' + token } });
-  const d = await r.json();
-  if (!r.ok) throw new Error(d.error?.message || 'Token tidak valid');
-  return d.user;
-}
-
-async function uploadFile(token, name, buffer) {
-  const shaBuf = await crypto.subtle.digest('SHA-1', buffer);
-  const sha = Array.from(new Uint8Array(shaBuf)).map(b => b.toString(16).padStart(2, '0')).join('');
-  const r = await fetch(API + '/v2/files', {
-    method: 'POST',
-    headers: {
-      Authorization: 'Bearer ' + token,
-      'Content-Type': 'application/octet-stream',
-      'x-vercel-digest': sha,
-    },
-    body: buffer,
-  });
-  if (!r.ok) throw new Error('Upload gagal (' + name + '): ' + (await r.text()).slice(0, 200));
-  return { file: name, sha, size: buffer.length };
-}
-
-async function deployFiles(token, projectName, files, onProgress) {
-  const uploaded = [];
-  for (let i = 0; i < files.length; i++) {
-    uploaded.push(await uploadFile(token, files[i].name, files[i].buffer));
-    onProgress?.(i + 1, files.length);
-  }
-  const r = await fetch(API + '/v13/deployments', {
-    method: 'POST',
-    headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      name: projectName,
-      target: 'production',
-      files: uploaded,
-      projectSettings: { framework: null },
-    }),
-  });
-  const d = await r.json();
-  if (!r.ok) throw new Error(d.error?.message || JSON.stringify(d));
-  return d;
-}
-
-async function deleteDeployment(token, id) {
-  const r = await fetch(`${API}/v13/deployments/${id}`, {
-    method: 'DELETE',
-    headers: { Authorization: 'Bearer ' + token },
-  });
-  if (!r.ok) {
-    const d = await r.json().catch(() => ({}));
-    throw new Error(d.error?.message || 'Gagal hapus');
-  }
-  return true;
-}
-
-function extractZip(buffer) {
-  const u8 = new Uint8Array(buffer);
-  const entries = unzipSync(u8, {
-    filter: (f) => {
-      if (f.name.endsWith('/')) return false;
-      if (f.name.includes('__MACOSX/')) return false;
-      if (f.name.startsWith('.')) return false;
-      if (f.name.includes('/._')) return false;
-      return true;
-    },
-  });
-  let files = Object.entries(entries).map(([name, data]) => ({
-    name, buffer: Buffer.from(data),
-  }));
-  if (files.length) {
-    const names = files.map(f => f.name);
-    const firsts = new Set(names.map(n => n.split('/')[0]));
-    if (firsts.size === 1 && names.every(n => n.includes('/'))) {
-      const root = [...firsts][0] + '/';
-      files = files.map(f => ({ name: f.name.slice(root.length), buffer: f.buffer }));
-    }
-  }
-  if (!files.length) throw new Error('ZIP kosong');
-  return files;
-}
-const isZip = (name) => (name || '').toLowerCase().endsWith('.zip');
-
-async function mailCreate() {
-  const doms = await (await fetch('https://api.mail.tm/domains?page=1')).json();
-  const dom = doms['hydra:member']?.[0]?.domain;
-  if (!dom) throw new Error('Tidak ada domain mail');
-  const addr = 'tg' + Math.random().toString(36).slice(2, 9) + '@' + dom;
-  const pass = Math.random().toString(36).slice(2, 14);
-  let r = await fetch('https://api.mail.tm/accounts', {
-    method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ address: addr, password: pass }),
-  });
-  if (!r.ok) throw new Error('Gagal buat akun: ' + (await r.text()).slice(0, 150));
-  r = await fetch('https://api.mail.tm/token', {
-    method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ address: addr, password: pass }),
-  });
-  const t = await r.json();
-  if (!t.token) throw new Error('Gagal ambil token mail');
-  return { addr, token: t.token };
-}
-async function mailInbox(token) {
-  const r = await fetch('https://api.mail.tm/messages?page=1', { headers: { Authorization: 'Bearer ' + token } });
-  const d = await r.json();
-  return d['hydra:member'] || [];
-}
-async function mailRead(token, id) {
-  const r = await fetch('https://api.mail.tm/messages/' + id, { headers: { Authorization: 'Bearer ' + token } });
-  const m = await r.json();
-  fetch('https://api.mail.tm/messages/' + id, {
-    method: 'PATCH',
-    headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ seen: true }),
-  }).catch(() => {});
-  return m;
-}
-
-/* ============================================================
-   KV HELPERS (Menggunakan Memory Sementara jika KV tidak ada)
-   ============================================================ */
-const memoryDB = new Map();
-const kvGet = async (key) => memoryDB.get(key);
-const kvSet = async (key, val) => { memoryDB.set(key, val); return val; };
-const kvDel = async (key) => { memoryDB.delete(key); };
-
-const KEY = {
-  activeToken: (c) => `tg:${c}:activeToken`,
-  accounts: (c) => `tg:${c}:accounts`,
-  pending: (c) => `tg:${c}:pending`,
-  history: (c) => `tg:${c}:history`,
-  mailbox: (c) => `tg:${c}:mailbox`,
-};
-
-async function getAccounts(chatId) { return (await kvGet(KEY.accounts(chatId))) || {}; }
-async function saveAccount(chatId, label, token, username) {
-  const acc = await getAccounts(chatId);
-  acc[label] = { label, token, username };
-  await kvSet(KEY.accounts(chatId), acc);
-  return acc;
-}
-async function removeAccount(chatId, label) {
-  const acc = await getAccounts(chatId);
-  delete acc[label];
-  await kvSet(KEY.accounts(chatId), acc);
-  return acc;
-}
-async function getActiveToken(chatId) { return kvGet(KEY.activeToken(chatId)); }
-async function setActiveToken(chatId, token) { return kvSet(KEY.activeToken(chatId), token); }
-async function clearActiveToken(chatId) { return kvDel(KEY.activeToken(chatId)); }
-
-async function getPending(chatId) { return kvGet(KEY.pending(chatId)); }
-async function setPending(chatId, data) { return kvSet(KEY.pending(chatId), data); }
-async function clearPending(chatId) { return kvDel(KEY.pending(chatId)); }
-
-async function addHistory(chatId, item) {
-  const list = (await kvGet(KEY.history(chatId))) || [];
-  list.unshift(item);
-  await kvSet(KEY.history(chatId), list.slice(0, 30));
-}
-async function getHistory(chatId) { return (await kvGet(KEY.history(chatId))) || []; }
-async function clearHistory(chatId) { return kvDel(KEY.history(chatId)); }
-
-async function getMailbox(chatId) { return kvGet(KEY.mailbox(chatId)); }
-async function saveMailbox(chatId, box) { return kvSet(KEY.mailbox(chatId), box); }
-async function clearMailbox(chatId) { return kvDel(KEY.mailbox(chatId)); }
-
-/* ============================================================
-   KEYBOARD
-   ============================================================ */
-const kbMain = () => ({ inline_keyboard: [
-  [{ text: '🚀 Deploy', callback_data: 'menu:deploy' }, { text: '👤 Akun', callback_data: 'menu:acc' }],
-  [{ text: '🗂️ Riwayat', callback_data: 'menu:hist' }, { text: '📬 Temp Mail', callback_data: 'menu:mail' }],
-]});
-const kbBack = () => ({ inline_keyboard: [[{ text: '⬅️ Menu', callback_data: 'menu:home' }]] });
-const kbAccounts = (list, active) => {
-  const rows = list.map(a => [
-    { text: (a.token === active ? '✅ ' : '') + a.label + ' — ' + a.username, callback_data: `acc:use:${a.label}` },
-    { text: '🗑️', callback_data: `acc:del:${a.label}` },
-  ]);
-  rows.push([{ text: '➕ Tambah Akun', callback_data: 'acc:add' }]);
-  rows.push([{ text: '⬅️ Menu', callback_data: 'menu:home' }]);
-  return { inline_keyboard: rows };
-};
-
-/* ============================================================
-   HANDLER (Polling Mode)
-   ============================================================ */
-async function startPolling() {
-  console.log("✅ Bot Deploy Pro berjalan (Polling Mode)...");
+async function loop() {
   let offset = 0;
+  console.log("✅ Bot berjalan di Railway...");
   while (true) {
     try {
       const res = await fetch(`https://api.telegram.org/bot${BOT}/getUpdates?offset=${offset}&timeout=30`);
@@ -222,35 +18,36 @@ async function startPolling() {
       if (data.result && data.result.length > 0) {
         for (const update of data.result) {
           offset = update.update_id + 1;
-          await processUpdate(update);
+          const msg = update.message;
+          if (msg && msg.text) {
+            const chatId = msg.chat.id;
+            const text = msg.text;
+            if (text === '/start') {
+              await reply(chatId, "🤖 <b>Halo! Bot ini sekarang JALAN di Railway!</b>\n\nKetik /mail untuk tes.");
+            } else if (text === '/mail') {
+              const doms = await (await fetch('https://api.mail.tm/domains?page=1')).json();
+              const dom = doms['hydra:member']?.[0]?.domain;
+              const addr = 'tg' + Math.random().toString(36).slice(2, 9) + '@' + dom;
+              const pass = Math.random().toString(36).slice(2, 14);
+              await fetch('https://api.mail.tm/accounts', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ address: addr, password: pass }) });
+              const t = await (await fetch('https://api.mail.tm/token', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ address: addr, password: pass }) })).json();
+              if (t.token) {
+                await reply(chatId, `📬 Email baru kamu:\n<code>${addr}</code>`);
+              } else {
+                await reply(chatId, "❌ Gagal bikin email.");
+              }
+            } else {
+              await reply(chatId, "Ketik /start atau /mail");
+            }
+          }
         }
       }
     } catch (e) {
-      console.log("Polling Error:", e.message);
-      await new Promise(r => setTimeout(r, 3000));
+      console.log("Error:", e.message);
     }
   }
 }
-
-async function processUpdate(update) {
-  try {
-    if (update.callback_query) {
-      const cb = update.callback_query;
-      const chatId = cb.message.chat.id;
-      const msgId = cb.message.message_id;
-      const data = cb.data;
-      await answerCb(cb.id);
-
-      if (data === 'menu:home') {
-        await editMsg(chatId, msgId, `<b>🤖 Bot Deploy Pro</b>\n\nPilih menu:`, { reply_markup: kbMain() });
-        return;
-      }
-      if (data === 'menu:acc') {
-        const acc = await getAccounts(chatId);
-        const active = await getActiveToken(chatId);
-        const list = Object.values(acc);
-        if (!list.length) {
-          await editMsg(chatId, msgId, `<b>👤 Akun Vercel</b>\n\nBelum ada.\nTambah: <code>/addacc label token</code>`, {
+loop();\nTambah: <code>/addacc label token</code>`, {
             reply_markup: { inline_keyboard: [[{ text: '➕ Tambah Akun', callback_data: 'acc:add' }], [{ text: '⬅️ Menu', callback_data: 'menu:home' }]] },
           });
         } else {
