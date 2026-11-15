@@ -1,0 +1,12 @@
+{
+  "name": "bot-deploy",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "start": "node bot.js"
+  },
+  "dependencies": {
+    "@vercel/kv": "^1.0.1",
+    "fflate": "^0.8.2"
+  }
+}
